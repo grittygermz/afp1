@@ -1,120 +1,231 @@
 package com.afp.replacement;
 
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.List;
-
 import com.afp.replacement.goca.GraphicsGroupWriter;
 import com.afp.replacement.model.ImageStrip;
 import com.afp.replacement.model.PageInfo;
 import com.afp.replacement.model.SectionBounds;
 import com.afp.replacement.parser.AfpSectionParser;
 
+import java.io.*;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Replaces legacy IM (Image) raster data in AFP files with GOCA vector
- * filled rectangles.
+ * Batch AFP-to-GOCA converter.
  *
- * <p>The program reads an AFP file containing an IM image object (BII…EII
- * block with ICP/IRD strips), strips it out, and injects one GOCA graphics
- * group per strip.  Each group draws a filled grey rectangle at the same
- * position and extent as the original raster tile.
+ * <p>Reads every file from an {@code in/} folder next to the jar, converts
+ * those that contain IM image objects (BII…EII blocks with ICP/IRD strips),
+ * and writes GOCA-graphics replacements to an {@code output/} folder.
  *
- * <p>Usage:
- * <pre>  java com.afp.replacement.AfpColorReplacer [input.afp] [output.afp]</pre>
+ * <p>Logging goes to console and to a timestamped file inside {@code log/}.
+ * A tracking CSV in {@code output/} records converted and skipped files.
  *
- * <h3>Architecture note</h3>
- * afplib is used <em>only for reading/parsing</em> (PGD, ICP, BII/EII
- * detection).  The output is written as raw bytes because the structured
- * fields we emit (OBD, IOC, IID, GDD) are not fully handled by afplib's
- * binary() serialiser — they become UNKNSF objects whose stored raw data
- * causes a duplicated 5A magic byte when re-written via AfpOutputStream.
+ * <p>Usage: {@code java -jar afp-converter.jar}
  */
 public class AfpColorReplacer {
 
-    public static void main(String[] args) throws IOException {
-        String input  = "O1XB3131_original.afp";
-        String output = "O1XB3131_output.afp";
-        // String input  = "O1XB3130_original.afp";
-        // String output = "O1XB3130_output.afp";
-        // String input  = "O1XB0024_original.afp";
-        // String output = "O1XB0024_output.afp";
+    /** Base directory = where the jar sits. */
+    private static Path jarDir;
 
-        if (args.length >= 2) {
-            input  = args[0];
-            output = args[1];
-        } else if (args.length == 1) {
-            input = args[0];
-        }
+    /** Input folder = {@code <jarDir>/in/}. */
+    private static Path inputDir;
+    /** Output folder = {@code <jarDir>/output/}. */
+    private static Path outputDir;
+    /** Log folder = {@code <jarDir>/log/}. */
+    private static Path logDir;
+    /** Tracking CSV (in log/ with timestamp). */
+    private static Path trackingFile;
+    private static String runTimestamp;
 
-        System.out.println("Input: " + input + "\nOutput: " + output);
-        convert(input, output);
-        System.out.println("Conversion complete!");
-    }
+    private static int convertedCount = 0;
+    private static int skippedCount   = 0;
+    private static PrintWriter logWriter;
 
-    // ----------------------------------------------------------------
-    //  Orchestrator
-    // ----------------------------------------------------------------
+    // ================================================================
+    //  Entry point
+    // ================================================================
 
-    /**
-     * Performs the full conversion:
-     * <ol>
-     *   <li>Read the input file into memory</li>
-     *   <li>Parse it with afplib (PGD page parameters, ICP strip positions)</li>
-     *   <li>Locate BII/EII boundaries via raw byte scanning</li>
-     *   <li>Emit the header bytes unchanged</li>
-     *   <li>Emit one GOCA graphics group per strip</li>
-     *   <li>Emit the trailer bytes unchanged</li>
-     * </ol>
-     */
-    public static void convert(String inputPath, String outputPath) throws IOException {
-        // ---- Read ----
-        byte[] fullInput;
-        try (InputStream in = new FileInputStream(inputPath)) {
-            fullInput = in.readAllBytes();
-        }
+    public static void main(String[] args) {
+        try {
+            resolveDirectories();
+            createDirectories();
+            initializeLogging();
+            log("=== AFP GOCA Converter started at %s ===%n", timestamp());
+            log("Jar directory: %s%n", jarDir);
 
-        // ---- Parse ----
-        List<ImageStrip> strips = new ArrayList<>();
-        PageInfo page           = new PageInfo();
-        SectionBounds bounds    = AfpSectionParser.parse(fullInput, strips, page);
+            // List files in the input directory
+            File[] files = inputDir.toFile().listFiles();
+            if (files == null || files.length == 0) {
+                log("No files found in '%s' — nothing to do.%n", inputDir);
+                logWriter.close();
+                return;
+            }
+            log("Found %d file(s) to process.%n", files.length);
 
-        // ---- Slice header and trailer from raw bytes ----
-        byte[] header  = java.util.Arrays.copyOfRange(fullInput, 0,             bounds.headerEnd);
-        byte[] trailer = java.util.Arrays.copyOfRange(fullInput, bounds.trailerStart, fullInput.length);
+            // Tracking CSV
+            try (PrintWriter track = new PrintWriter(new FileWriter(trackingFile.toFile()))) {
+                track.println("filename,status,strips,page_size,reason");
 
-        logSummary(strips, page, header, trailer);
-
-        // ---- Write ----
-        GraphicsGroupWriter groupWriter = new GraphicsGroupWriter(page);
-
-        try (OutputStream out = new FileOutputStream(outputPath)) {
-            out.write(header);
-
-            // Sequence numbers run from 0 up to 9 per strip × number of strips.
-            // The viewer only requires uniqueness, not specific values.
-            int sequenceNumber = 0;
-            for (ImageStrip strip : strips) {
-                groupWriter.write(out, strip, sequenceNumber);
-                sequenceNumber += 9;
+                for (File f : files) {
+                    if (f.isFile()) {
+                        processOneFile(f.toPath(), track);
+                    }
+                }
             }
 
-            out.write(trailer);
+            log("%n=== Summary: %d converted, %d skipped ===%n", convertedCount, skippedCount);
+            log("Tracking: %s%n", trackingFile);
+            log("Log file: %s%n", getCurrentLogPath());
+            log("Output:   %s%n", outputDir);
+
+        } catch (Exception e) {
+            System.err.println("FATAL: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(1);
+        } finally {
+            if (logWriter != null) logWriter.close();
         }
     }
 
-    // ----------------------------------------------------------------
-    //  Logging
-    // ----------------------------------------------------------------
+    // ================================================================
+    //  Directory resolution (relative to the jar)
+    // ================================================================
 
-    private static void logSummary(List<ImageStrip> strips, PageInfo page,
-                                   byte[] header, byte[] trailer) {
-        System.out.println("  Strips=" + strips.size()
-            + "  page=" + page.xSize + "\u00d7" + page.ySize
-            + "  units=" + page.xUnits + "\u00d7" + page.yUnits
-            + "  header=" + header.length + "  trailer=" + trailer.length);
+    /**
+     * Determines the jar's location at runtime so that the {@code in/},
+     * {@code output/} and {@code log/} directories are found relative to
+     * the jar regardless of the current working directory.
+     */
+    private static void resolveDirectories() {
+        try {
+            String jarPath = AfpColorReplacer.class
+                .getProtectionDomain()
+                .getCodeSource()
+                .getLocation()
+                .toURI()
+                .getPath();
+            // On Windows the path may start with /C:/… ; decode URL encoding
+            jarPath = URLDecoder.decode(jarPath, StandardCharsets.UTF_8);
+            if (jarPath.startsWith("/") && jarPath.length() > 3 && jarPath.charAt(2) == ':') {
+                jarPath = jarPath.substring(1);
+            }
+            jarDir = Paths.get(jarPath).getParent();
+        } catch (Exception e) {
+            // Fallback to working directory
+            jarDir = Paths.get(".").normalize().toAbsolutePath();
+        }
+
+        // Strip any leading slash on Windows drives
+        inputDir     = jarDir.resolve("in");
+        outputDir    = jarDir.resolve("output");
+        logDir       = jarDir.resolve("log");
+        runTimestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+        trackingFile = logDir.resolve("conversion_log_" + runTimestamp + ".csv");
+    }
+
+    private static void createDirectories() throws IOException {
+        Files.createDirectories(outputDir);
+        Files.createDirectories(logDir);
+        // inputDir is expected to exist already; if not, we handle it gracefully
+    }
+
+    // ================================================================
+    //  Logging
+    // ================================================================
+
+    private static void initializeLogging() throws IOException {
+        Path logFile = getCurrentLogPath();
+        logWriter = new PrintWriter(new FileWriter(logFile.toFile(), true), true);
+    }
+
+    private static Path getCurrentLogPath() {
+        return logDir.resolve("conversion_" + runTimestamp + ".log");
+    }
+
+    private static void log(String format, Object... args) {
+        String msg = String.format(format, args);
+        System.out.print(msg);
+        if (logWriter != null) {
+            logWriter.print(msg);
+            logWriter.flush();
+        }
+    }
+
+    private static String timestamp() {
+        return LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+    }
+
+    // ================================================================
+    //  Per-file processing
+    // ================================================================
+
+    private static void processOneFile(Path inputPath, PrintWriter track) {
+        String fileName = inputPath.getFileName().toString();
+        Path outputPath = outputDir.resolve(fileName);
+
+        log("--- %s%n", fileName);
+
+        try {
+            byte[] inputData = Files.readAllBytes(inputPath);
+            List<ImageStrip> strips = new ArrayList<>();
+            PageInfo page = new PageInfo();
+
+            SectionBounds bounds;
+            try {
+                bounds = AfpSectionParser.parse(inputData, strips, page);
+            } catch (IllegalArgumentException e) {
+                log("  SKIPPED: %s%n", e.getMessage());
+                Files.copy(inputPath, outputPath, StandardCopyOption.REPLACE_EXISTING);
+                log("  -> %s (copied as-is)%n", outputPath.getFileName());
+                track.printf("%s,skipped,0,0x0,%s%n", fileName, e.getMessage());
+                skippedCount++;
+                return;
+            }
+
+            // Slice header/trailer from the original file
+            byte[] header  = copyOfRange(inputData, 0, bounds.headerEnd);
+            byte[] trailer = copyOfRange(inputData, bounds.trailerStart, inputData.length);
+
+            log("  Strips=%d  page=%dx%d  units=%dx%d  header=%d  trailer=%d%n",
+                strips.size(), page.xSize, page.ySize, page.xUnits, page.yUnits,
+                header.length, trailer.length);
+
+            // Write output
+            GraphicsGroupWriter groupWriter = new GraphicsGroupWriter(page);
+            try (OutputStream out = new FileOutputStream(outputPath.toFile())) {
+                out.write(header);
+
+                int seq = 0;
+                for (ImageStrip strip : strips) {
+                    groupWriter.write(out, strip, seq);
+                    seq += 9;
+                }
+
+                out.write(trailer);
+            }
+
+            log("  -> %s (%d bytes)%n", outputPath.getFileName(), Files.size(outputPath));
+            track.printf("%s,converted,%d,%dx%d,%n",
+                fileName, strips.size(), page.xSize, page.ySize);
+            convertedCount++;
+
+        } catch (Exception e) {
+            log("  ERROR: %s%n", e.getMessage());
+            track.printf("%s,error,0,0x0,%s%n", fileName, e.getMessage());
+            skippedCount++;
+        }
+    }
+
+    // ================================================================
+    //  Utility
+    // ================================================================
+
+    private static byte[] copyOfRange(byte[] src, int from, int to) {
+        return java.util.Arrays.copyOfRange(src, from, to);
     }
 }
