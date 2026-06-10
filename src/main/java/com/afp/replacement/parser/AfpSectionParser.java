@@ -6,6 +6,7 @@ import com.afp.replacement.model.SectionBounds;
 import org.afplib.afplib.BII;
 import org.afplib.afplib.EII;
 import org.afplib.afplib.ICP;
+import org.afplib.afplib.IOC;
 import org.afplib.afplib.PGD;
 import org.afplib.io.AfpInputStream;
 
@@ -72,6 +73,11 @@ public final class AfpSectionParser {
                     strips.clear();
                 } else if (sf instanceof EII) {
                     insideImageObject = false;
+                } else if (sf instanceof IOC && insideImageObject) {
+                    // Capture the IOC origin offset so that ICP coordinates,
+                    // which are relative to the IOC, can be converted to
+                    // absolute page coordinates for GOCA GBOX positioning.
+                    page.setIocOffset((IOC) sf);
                 } else if (insideImageObject && sf instanceof ICP) {
                     strips.add(ImageStrip.fromIcp((ICP) sf));
                 }

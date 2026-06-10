@@ -51,12 +51,16 @@ public class GraphicsGroupWriter {
     private final byte[] gddTemplate;
     private final GocaStreamBuilder gocaBuilder;
     private final int pageHeight;
+    private final int xOffset;   // IOC origin offset added to strip originX
+    private final int yOffset;   // IOC origin offset added to strip originY
 
     public GraphicsGroupWriter(PageInfo page) {
         this.obdTemplate = ObdTemplateBuilder.build(page);
         this.gddTemplate = GddTemplateBuilder.build(page);
         this.gocaBuilder = new GocaStreamBuilder();
         this.pageHeight  = page.ySize;
+        this.xOffset     = page.xOriginOffset;
+        this.yOffset     = page.yOriginOffset;
     }
 
     /** Writes one complete 9-field strip group.  seq is the starting sequence number. */
@@ -91,8 +95,14 @@ public class GraphicsGroupWriter {
         // YCSize) when fill is zero, which happens when it is absent.
         int boxWidth  = (strip.fillWidth  > 0) ? strip.fillWidth  : strip.cellWidth;
         int boxHeight = (strip.fillHeight > 0) ? strip.fillHeight : strip.cellHeight;
+
+        // ICP coordinates are relative to the IOC origin.  Convert to
+        // absolute page coordinates by adding the IOC origin offset.
+        int absX = strip.originX + xOffset;
+        int absY = strip.originY + yOffset;
+
         byte[] gocaData = gocaBuilder.build(
-            strip.originX, strip.originY,
+            absX, absY,
             boxWidth, boxHeight, pageHeight);
 
         int totalLength = SF_HEADER_SIZE + gocaData.length;
