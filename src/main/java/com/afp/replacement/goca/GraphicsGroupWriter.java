@@ -51,8 +51,10 @@ public class GraphicsGroupWriter {
     private final byte[] gddTemplate;
     private final GocaStreamBuilder gocaBuilder;
     private final int pageHeight;
-    private final int xOffset;   // IOC origin offset added to strip originX
-    private final int yOffset;   // IOC origin offset added to strip originY
+    private final int xOffset;      // IOC origin offset added to strip originX
+    private final int yOffset;      // IOC origin offset added to strip originY
+    private final double scaleX;    // IID-to-page scale factor (ICP units → page units)
+    private final double scaleY;
 
     public GraphicsGroupWriter(PageInfo page) {
         this.obdTemplate = ObdTemplateBuilder.build(page);
@@ -61,6 +63,8 @@ public class GraphicsGroupWriter {
         this.pageHeight  = page.ySize;
         this.xOffset     = page.xOriginOffset;
         this.yOffset     = page.yOriginOffset;
+        this.scaleX      = page.scaleX;
+        this.scaleY      = page.scaleY;
     }
 
     /** Writes one complete 9-field strip group.  seq is the starting sequence number. */
@@ -90,16 +94,24 @@ public class GraphicsGroupWriter {
 
     private void writeGadSf(OutputStream out, ImageStrip strip, int seq)
             throws IOException {
+        // ICP coordinate values (origin, cell size, fill size) are in
+        // the image coordinate system defined by the IID.  The page
+        // coordinate system (PGD) may use a different unit resolution.
+        // Scale ICP values to page units before converting to GOCA space.
         // Use fill sizes (XFilSize/YFilSize) when available; these are
         // the actual rendered extents.  Fall back to cell sizes (XCSize/
-        // YCSize) when fill is zero, which happens when it is absent.
-        int boxWidth  = (strip.fillWidth  > 0) ? strip.fillWidth  : strip.cellWidth;
-        int boxHeight = (strip.fillHeight > 0) ? strip.fillHeight : strip.cellHeight;
+        // YCSize) when fill is zero (rare; indicates absent field).
+        int rawWidth  = (strip.fillWidth  > 0) ? strip.fillWidth  : strip.cellWidth;
+        int rawHeight = (strip.fillHeight > 0) ? strip.fillHeight : strip.cellHeight;
 
         // ICP coordinates are relative to the IOC origin.  Convert to
-        // absolute page coordinates by adding the IOC origin offset.
-        int absX = strip.originX + xOffset;
-        int absY = strip.originY + yOffset;
+        // absolute page coordinates by adding the IOC origin offset,
+        // then scale from IID units to page units.
+        int absX = (int) Math.round((strip.originX + xOffset) * scaleX);
+        int absY = (int) Math.round((strip.originY + yOffset) * scaleY);
+
+        int boxWidth  = (int) Math.round(rawWidth  * scaleX);
+        int boxHeight = (int) Math.round(rawHeight * scaleY);
 
         byte[] gocaData = gocaBuilder.build(
             absX, absY,

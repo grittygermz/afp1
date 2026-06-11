@@ -3,23 +3,24 @@ package com.afp.replacement.parser;
 import com.afp.replacement.model.ImageStrip;
 import com.afp.replacement.model.PageInfo;
 import com.afp.replacement.model.SectionBounds;
+
 import org.afplib.afplib.BII;
 import org.afplib.afplib.EII;
 import org.afplib.afplib.ICP;
+import org.afplib.afplib.IID;
 import org.afplib.afplib.IOC;
 import org.afplib.afplib.PGD;
 import org.afplib.io.AfpInputStream;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
  * Reads an AFP file (as a raw byte array) and extracts the information
- * needed for the GOCA conversion: PGD page parameters, ICP strip positions,
- * and the byte offsets of the BII/EII structured fields for header/trailer
- * slicing.
+ * needed for the GOCA conversion: PGD page parameters, IID image
+ * coordinate-system, IOC origin offset, ICP strip positions, and the
+ * byte offsets of the BII/EII boundaries.
  *
  * <p>afplib is used for parsing the structured fields; raw byte scanning
  * is used for BII/EII offset detection because afplib's getOffset() can
@@ -28,7 +29,6 @@ import java.util.List;
 public final class AfpSectionParser {
 
     private static final byte AFP_MAGIC = 0x5A;
-
     private static final int SF_ID_BII = 0xD3A87B;
     private static final int SF_ID_EII = 0xD3A97B;
 
@@ -39,12 +39,13 @@ public final class AfpSectionParser {
      *
      * @param data    the complete AFP file contents
      * @param strips  list to populate with ImageStrip objects
-     * @param page    PageInfo to populate from PGD
+     * @param page    PageInfo to populate from PGD, IOC, and IID
      * @return        header/trailer SectionBounds
      */
     public static SectionBounds parse(byte[] data, List<ImageStrip> strips, PageInfo page)
             throws IOException {
         parseAfpFields(data, strips, page);
+        page.validate();
         return locateBiiEii(data);
     }
 
@@ -56,6 +57,7 @@ public final class AfpSectionParser {
             throws IOException {
         try (AfpInputStream in = new AfpInputStream(new ByteArrayInputStream(data))) {
             boolean insideImageObject = false;
+            boolean iidSeen = false;
 
             while (true) {
                 org.afplib.base.SF sf;
@@ -70,15 +72,23 @@ public final class AfpSectionParser {
                     page.readFrom((PGD) sf);
                 } else if (sf instanceof BII) {
                     insideImageObject = true;
+                    iidSeen = false;
                     strips.clear();
                 } else if (sf instanceof EII) {
                     insideImageObject = false;
                 } else if (sf instanceof IOC && insideImageObject) {
-                    // Capture the IOC origin offset so that ICP coordinates,
-                    // which are relative to the IOC, can be converted to
-                    // absolute page coordinates for GOCA GBOX positioning.
                     page.setIocOffset((IOC) sf);
-                } else if (insideImageObject && sf instanceof ICP) {
+                } else if (sf instanceof IID && insideImageObject) {
+                    // IID defines the image's coordinate system (units).
+                    // ICP coordinates/fill sizes are in this space and
+                    // must be scaled to the page coordinate system (PGD).
+                    page.setIidScale((IID) sf);
+                    iidSeen = true;
+                } else if (sf instanceof ICP && insideImageObject) {
+                    if (!iidSeen) {
+                        throw new IOException(
+                            "ICP encountered before IID — cannot determine image coordinate system");
+                    }
                     strips.add(ImageStrip.fromIcp((ICP) sf));
                 }
             }
