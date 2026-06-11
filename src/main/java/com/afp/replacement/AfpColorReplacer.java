@@ -4,6 +4,7 @@ import com.afp.replacement.goca.GraphicsGroupWriter;
 import com.afp.replacement.model.ImageStrip;
 import com.afp.replacement.model.PageInfo;
 import com.afp.replacement.model.SectionBounds;
+import com.afp.replacement.model.SectionBounds.ImageBlock;
 import com.afp.replacement.parser.AfpSectionParser;
 
 import java.io.*;
@@ -12,7 +13,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -172,12 +172,11 @@ public class AfpColorReplacer {
 
         try {
             byte[] inputData = Files.readAllBytes(inputPath);
-            List<ImageStrip> strips = new ArrayList<>();
             PageInfo page = new PageInfo();
 
             SectionBounds bounds;
             try {
-                bounds = AfpSectionParser.parse(inputData, strips, page);
+                bounds = AfpSectionParser.parse(inputData, page);
             } catch (IllegalArgumentException e) {
                 log("  SKIPPED: %s%n", e.getMessage());
                 Files.copy(inputPath, outputPath, StandardCopyOption.REPLACE_EXISTING);
@@ -187,13 +186,18 @@ public class AfpColorReplacer {
                 return;
             }
 
-            // Slice header/trailer from the original file
-            byte[] header  = copyOfRange(inputData, 0, bounds.headerEnd);
+            // Slice header and trailer from the original file
+            byte[] header  = copyOfRange(inputData, 0,             bounds.headerEnd);
             byte[] trailer = copyOfRange(inputData, bounds.trailerStart, inputData.length);
 
-            log("  Strips=%d  page=%dx%d  units=%dx%d  header=%d  trailer=%d%n",
-                strips.size(), page.xSize, page.ySize, page.xUnits, page.yUnits,
-                header.length, trailer.length);
+            // Count total strips across all ICP-containing blocks
+            int totalStrips = bounds.imageBlocks.stream()
+                .filter(b -> b.hasICP)
+                .mapToInt(b -> b.strips.size()).sum();
+
+            log("  Strips=%d  page=%dx%d  units=%dx%d  header=%d  trailer=%d  blocks=%d%n",
+                totalStrips, page.xSize, page.ySize, page.xUnits, page.yUnits,
+                header.length, trailer.length, bounds.imageBlocks.size());
 
             // Write output
             GraphicsGroupWriter groupWriter = new GraphicsGroupWriter(page);
@@ -201,9 +205,17 @@ public class AfpColorReplacer {
                 out.write(header);
 
                 int seq = 0;
-                for (ImageStrip strip : strips) {
-                    groupWriter.write(out, strip, seq);
-                    seq += 9;
+                for (ImageBlock block : bounds.imageBlocks) {
+                    if (block.hasICP) {
+                        // Replace ICP-based block with GOCA groups
+                        for (ImageStrip strip : block.strips) {
+                            groupWriter.write(out, strip, seq);
+                            seq += 9;
+                        }
+                    } else {
+                        // Preserve IRD-only block as raw bytes
+                        out.write(inputData, block.start, block.end - block.start);
+                    }
                 }
 
                 out.write(trailer);
@@ -211,7 +223,7 @@ public class AfpColorReplacer {
 
             log("  -> %s (%d bytes)%n", outputPath.getFileName(), Files.size(outputPath));
             track.printf("%s,converted,%d,%dx%d,%n",
-                fileName, strips.size(), page.xSize, page.ySize);
+                fileName, totalStrips, page.xSize, page.ySize);
             convertedCount++;
 
         } catch (Exception e) {

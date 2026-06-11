@@ -3,6 +3,7 @@ package com.afp.replacement.parser;
 import com.afp.replacement.model.ImageStrip;
 import com.afp.replacement.model.PageInfo;
 import com.afp.replacement.model.SectionBounds;
+import com.afp.replacement.model.SectionBounds.ImageBlock;
 
 import org.afplib.afplib.BII;
 import org.afplib.afplib.EII;
@@ -14,13 +15,14 @@ import org.afplib.io.AfpInputStream;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
  * Reads an AFP file (as a raw byte array) and extracts the information
  * needed for the GOCA conversion: PGD page parameters, IID image
  * coordinate-system, IOC origin offset, ICP strip positions, and the
- * byte offsets of the BII/EII boundaries.
+ * byte offsets of all BII/EII boundaries.
  *
  * <p>afplib is used for parsing the structured fields; raw byte scanning
  * is used for BII/EII offset detection because afplib's getOffset() can
@@ -29,8 +31,9 @@ import java.util.List;
 public final class AfpSectionParser {
 
     private static final byte AFP_MAGIC = 0x5A;
-    private static final int SF_ID_BII = 0xD3A87B;
-    private static final int SF_ID_EII = 0xD3A97B;
+    private static final int SF_ID_BII  = 0xD3A87B;
+    private static final int SF_ID_EII  = 0xD3A97B;
+    private static final int SF_ID_ICP  = 0xD3AC7B;
 
     private AfpSectionParser() {}
 
@@ -38,25 +41,25 @@ public final class AfpSectionParser {
      * Parses the provided raw AFP bytes.
      *
      * @param data    the complete AFP file contents
-     * @param strips  list to populate with ImageStrip objects
      * @param page    PageInfo to populate from PGD, IOC, and IID
-     * @return        header/trailer SectionBounds
+     * @return        SectionBounds with all image blocks and their strips
      */
-    public static SectionBounds parse(byte[] data, List<ImageStrip> strips, PageInfo page)
+    public static SectionBounds parse(byte[] data, PageInfo page)
             throws IOException {
-        parseAfpFields(data, strips, page);
+        SectionBounds bounds = locateBiiEii(data);
+        parseAfpFields(data, page, bounds.imageBlocks);
         page.validate();
-        return locateBiiEii(data);
+        return bounds;
     }
 
     // ----------------------------------------------------------------
     //  afplib-based field parsing
     // ----------------------------------------------------------------
 
-    private static void parseAfpFields(byte[] data, List<ImageStrip> strips, PageInfo page)
-            throws IOException {
+    private static void parseAfpFields(byte[] data, PageInfo page,
+                                       List<ImageBlock> blocks) throws IOException {
         try (AfpInputStream in = new AfpInputStream(new ByteArrayInputStream(data))) {
-            boolean insideImageObject = false;
+            int blockIndex = -1;
             boolean iidSeen = false;
 
             while (true) {
@@ -71,38 +74,38 @@ public final class AfpSectionParser {
                 if (sf instanceof PGD) {
                     page.readFrom((PGD) sf);
                 } else if (sf instanceof BII) {
-                    insideImageObject = true;
+                    blockIndex++;
                     iidSeen = false;
-                    strips.clear();
                 } else if (sf instanceof EII) {
-                    insideImageObject = false;
-                } else if (sf instanceof IOC && insideImageObject) {
+                    // End of current block — nothing to do
+                } else if (sf instanceof IOC && blockIndex >= 0) {
                     page.setIocOffset((IOC) sf);
-                } else if (sf instanceof IID && insideImageObject) {
-                    // IID defines the image's coordinate system (units).
-                    // ICP coordinates/fill sizes are in this space and
-                    // must be scaled to the page coordinate system (PGD).
+                } else if (sf instanceof IID && blockIndex >= 0) {
                     page.setIidScale((IID) sf);
                     iidSeen = true;
-                } else if (sf instanceof ICP && insideImageObject) {
+                } else if (sf instanceof ICP && blockIndex >= 0) {
                     if (!iidSeen) {
                         throw new IOException(
                             "ICP encountered before IID — cannot determine image coordinate system");
                     }
-                    strips.add(ImageStrip.fromIcp((ICP) sf));
+                    if (blockIndex < blocks.size()) {
+                        blocks.get(blockIndex).strips.add(ImageStrip.fromIcp((ICP) sf));
+                    }
                 }
             }
         }
     }
 
     // ----------------------------------------------------------------
-    //  Raw byte scanning for BII/EII boundaries
+    //  Raw byte scanning for all BII/EII pairs
     // ----------------------------------------------------------------
 
     private static SectionBounds locateBiiEii(byte[] data) {
+        List<ImageBlock> blocks = new ArrayList<>();
         int headerEnd    = -1;
         int trailerStart = -1;
         int pos          = 0;
+        int biiStart     = -1;
 
         while (pos < data.length - 10) {
             if (data[pos] != AFP_MAGIC) {
@@ -114,19 +117,46 @@ public final class AfpSectionParser {
                        | ((data[pos + 4] & 0xFF) << 8)
                        |  (data[pos + 5] & 0xFF);
 
-            if (sfId == SF_ID_BII && headerEnd < 0) {
-                headerEnd = pos;
+            if (sfId == SF_ID_BII) {
+                if (headerEnd < 0) {
+                    headerEnd = pos;
+                }
+                biiStart = pos;
             }
-            if (sfId == SF_ID_EII && headerEnd >= 0 && trailerStart < 0) {
-                trailerStart = pos + length + 1;
+
+            if (sfId == SF_ID_EII && biiStart >= 0) {
+                int blockEnd = pos + length + 1;
+                boolean hasICP = hasIcpInRange(data, biiStart, blockEnd);
+                blocks.add(new ImageBlock(biiStart, blockEnd, hasICP));
+                biiStart = -1;
+                trailerStart = blockEnd;  // update trailer to after this block
             }
+
             pos += length + 1;
         }
 
-        if (headerEnd < 0 || trailerStart < 0) {
+        if (headerEnd < 0 || trailerStart < 0 || blocks.isEmpty()) {
             throw new IllegalArgumentException(
                 "No BII/EII pair found — input may not be a valid IM-image AFP file");
         }
-        return new SectionBounds(headerEnd, trailerStart);
+        return new SectionBounds(headerEnd, trailerStart, blocks);
+    }
+
+    /** Checks whether any ICP SF exists between start (inclusive) and end (exclusive). */
+    private static boolean hasIcpInRange(byte[] data, int start, int end) {
+        int pos = start;
+        while (pos < end - 10) {
+            if (data[pos] == AFP_MAGIC) {
+                int len = ((data[pos + 1] & 0xFF) << 8) | (data[pos + 2] & 0xFF);
+                int id  = ((data[pos + 3] & 0xFF) << 16)
+                        | ((data[pos + 4] & 0xFF) << 8)
+                        |  (data[pos + 5] & 0xFF);
+                if (id == SF_ID_ICP) return true;
+                pos += len + 1;
+            } else {
+                pos++;
+            }
+        }
+        return false;
     }
 }
