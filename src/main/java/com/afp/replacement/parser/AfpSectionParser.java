@@ -34,6 +34,7 @@ public final class AfpSectionParser {
     private static final int SF_ID_BII  = 0xD3A87B;
     private static final int SF_ID_EII  = 0xD3A97B;
     private static final int SF_ID_ICP  = 0xD3AC7B;
+    private static final int SF_ID_EAG  = 0xD3A9C9;
 
     private AfpSectionParser() {}
 
@@ -104,6 +105,7 @@ public final class AfpSectionParser {
         List<ImageBlock> blocks = new ArrayList<>();
         int headerEnd    = -1;
         int trailerStart = -1;
+        int frontEnd     = -1;
         int pos          = 0;
         int biiStart     = -1;
 
@@ -120,8 +122,15 @@ public final class AfpSectionParser {
             if (sfId == SF_ID_BII) {
                 if (headerEnd < 0) {
                     headerEnd = pos;
+                    if (frontEnd < 0) frontEnd = pos; // no EAG found
                 }
                 biiStart = pos;
+            }
+
+            if (sfId == SF_ID_EAG && frontEnd < 0) {
+                // Record the byte right after the EAG so GOCA groups can
+                // be inserted before the grid lines (which follow EAG).
+                frontEnd = pos + length + 1;
             }
 
             if (sfId == SF_ID_EII && biiStart >= 0) {
@@ -139,7 +148,7 @@ public final class AfpSectionParser {
             throw new IllegalArgumentException(
                 "No BII/EII pair found — input may not be a valid IM-image AFP file");
         }
-        return new SectionBounds(headerEnd, trailerStart, blocks);
+        return new SectionBounds(frontEnd, headerEnd, trailerStart, blocks);
     }
 
     /** Checks whether any ICP SF exists between start (inclusive) and end (exclusive). */

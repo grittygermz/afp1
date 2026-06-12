@@ -186,8 +186,9 @@ public class AfpColorReplacer {
                 return;
             }
 
-            // Slice header and trailer from the original file
-            byte[] header  = copyOfRange(inputData, 0,             bounds.headerEnd);
+            // Slice front (up to EAG), grid (EAG to first BII), and trailer
+            byte[] front   = copyOfRange(inputData, 0,              bounds.frontEnd);
+            byte[] grid    = copyOfRange(inputData, bounds.frontEnd, bounds.headerEnd);
             byte[] trailer = copyOfRange(inputData, bounds.trailerStart, inputData.length);
 
             // Count total strips across all ICP-containing blocks
@@ -195,25 +196,34 @@ public class AfpColorReplacer {
                 .filter(b -> b.hasICP)
                 .mapToInt(b -> b.strips.size()).sum();
 
-            log("  Strips=%d  page=%dx%d  units=%dx%d  header=%d  trailer=%d  blocks=%d%n",
+            log("  Strips=%d  page=%dx%d  units=%dx%d  front=%d  grid=%d  trailer=%d  blocks=%d%n",
                 totalStrips, page.xSize, page.ySize, page.xUnits, page.yUnits,
-                header.length, trailer.length, bounds.imageBlocks.size());
+                front.length, grid.length, trailer.length, bounds.imageBlocks.size());
 
-            // Write output
+            // Write output.
+            // Order: front (thru EAG) → GOCA groups → grid (BPT/PTX/EPT) →
+            //        non-ICP blocks (IRD-only) → trailer.
+            // GOCA groups come before the grid lines so the grid paints on top.
             GraphicsGroupWriter groupWriter = new GraphicsGroupWriter(page);
             try (OutputStream out = new FileOutputStream(outputPath.toFile())) {
-                out.write(header);
+                out.write(front);
 
+                // Emit all GOCA groups from ICP-containing blocks
                 int seq = 0;
                 for (ImageBlock block : bounds.imageBlocks) {
                     if (block.hasICP) {
-                        // Replace ICP-based block with GOCA groups
                         for (ImageStrip strip : block.strips) {
                             groupWriter.write(out, strip, seq);
                             seq += 9;
                         }
-                    } else {
-                        // Preserve IRD-only block as raw bytes
+                    }
+                }
+
+                out.write(grid);
+
+                // Preserve non-ICP (IRD-only) blocks as raw bytes
+                for (ImageBlock block : bounds.imageBlocks) {
+                    if (!block.hasICP) {
                         out.write(inputData, block.start, block.end - block.start);
                     }
                 }

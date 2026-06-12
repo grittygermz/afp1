@@ -12,6 +12,14 @@ import java.util.List;
  */
 public class SectionBounds {
 
+    /**
+     * Byte after the EAG (End Active Environment Group) SF.
+     * GOCA groups are inserted here so they appear behind the grid
+     * lines (BPT/PTX/EPT) that follow.  When no EAG is present in
+     * the header, this equals {@link #headerEnd}.
+     */
+    public final int frontEnd;
+
     /** Exclusive end of the header (byte offset of the first BII's 5A). */
     public final int headerEnd;
     /** Inclusive start of the trailer (first byte after the last EII). */
@@ -20,7 +28,9 @@ public class SectionBounds {
     /** One entry per BII…EII pair in the file, in file order. */
     public final List<ImageBlock> imageBlocks;
 
-    public SectionBounds(int headerEnd, int trailerStart, List<ImageBlock> imageBlocks) {
+    public SectionBounds(int frontEnd, int headerEnd, int trailerStart,
+                         List<ImageBlock> imageBlocks) {
+        this.frontEnd = frontEnd;
         this.headerEnd = headerEnd;
         this.trailerStart = trailerStart;
         this.imageBlocks = imageBlocks;
