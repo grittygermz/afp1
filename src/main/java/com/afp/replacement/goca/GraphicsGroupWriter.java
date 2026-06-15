@@ -51,9 +51,7 @@ public class GraphicsGroupWriter {
     private final byte[] gddTemplate;
     private final GocaStreamBuilder gocaBuilder;
     private final int pageHeight;
-    private final int xOffset;      // IOC origin offset added to strip originX
-    private final int yOffset;      // IOC origin offset added to strip originY
-    private final double scaleX;    // IID-to-page scale factor (ICP units → page units)
+    private final double scaleX;
     private final double scaleY;
 
     public GraphicsGroupWriter(PageInfo page) {
@@ -61,14 +59,26 @@ public class GraphicsGroupWriter {
         this.gddTemplate = GddTemplateBuilder.build(page);
         this.gocaBuilder = new GocaStreamBuilder();
         this.pageHeight  = page.ySize;
-        this.xOffset     = page.xOriginOffset;
-        this.yOffset     = page.yOriginOffset;
         this.scaleX      = page.scaleX;
         this.scaleY      = page.scaleY;
     }
 
-    /** Writes one complete 9-field strip group.  seq is the starting sequence number. */
+    /** Writes one group using the global IOC offset (single-block files). */
     public void write(OutputStream out, ImageStrip strip, int seq) throws IOException {
+        write(out, strip, seq, 0, 0);
+    }
+
+    /**
+     * Writes one complete 9-field strip group with per-block IOC offsets.
+     *
+     * @param out      output stream
+     * @param strip    strip data (ICP origin, fill sizes in IID units)
+     * @param seq      sequence number for the 3-byte flags field
+     * @param xOffset  IOC xOriginOffset for this strip's image block
+     * @param yOffset  IOC yOriginOffset for this strip's image block
+     */
+    public void write(OutputStream out, ImageStrip strip, int seq,
+                      int xOffset, int yOffset) throws IOException {
         byte[] name = EbcdicEncoder.encode("OGL GOCA", NAME_FIELD_LENGTH);
 
         writeTemplate(out, new byte[][]{
@@ -81,7 +91,7 @@ public class GraphicsGroupWriter {
             staticTemplate(SF_ID_EOC, 0x10, name),
         }, seq);
 
-        writeGadSf(out, strip, seq + 7);
+        writeGadSf(out, strip, seq + 7, xOffset, yOffset);
 
         writeTemplate(out, new byte[][]{
             staticTemplate(SF_ID_EGR, 0x10, name),
@@ -92,8 +102,8 @@ public class GraphicsGroupWriter {
     //  GAD — Graphics Area Descriptor
     // ----------------------------------------------------------------
 
-    private void writeGadSf(OutputStream out, ImageStrip strip, int seq)
-            throws IOException {
+    private void writeGadSf(OutputStream out, ImageStrip strip, int seq,
+                            int xOffset, int yOffset) throws IOException {
         // ICP coordinate values (origin, cell size, fill size) are in
         // the image coordinate system defined by the IID.  The page
         // coordinate system (PGD) may use a different unit resolution.
@@ -104,9 +114,9 @@ public class GraphicsGroupWriter {
         int rawWidth  = (strip.fillWidth  > 0) ? strip.fillWidth  : strip.cellWidth;
         int rawHeight = (strip.fillHeight > 0) ? strip.fillHeight : strip.cellHeight;
 
-        // ICP coordinates are relative to the IOC origin.  Convert to
-        // absolute page coordinates by adding the IOC origin offset,
-        // then scale from IID units to page units.
+        // ICP coordinates are relative to this block's IOC origin.
+        // Convert to absolute page coordinates by adding the IOC
+        // origin offset, then scale from IID units to page units.
         int absX = (int) Math.round((strip.originX + xOffset) * scaleX);
         int absY = (int) Math.round((strip.originY + yOffset) * scaleY);
 

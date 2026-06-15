@@ -208,12 +208,15 @@ public class AfpColorReplacer {
             try (OutputStream out = new FileOutputStream(outputPath.toFile())) {
                 out.write(front);
 
-                // Emit all GOCA groups from ICP-containing blocks
+                // Emit all GOCA groups from ICP-containing blocks.
+                // Each block may have its own IOC offset; pass it per-strip.
                 int seq = 0;
                 for (ImageBlock block : bounds.imageBlocks) {
                     if (block.hasICP) {
+                        int bx = block.iocSet ? block.xOffset : page.xOriginOffset;
+                        int by = block.iocSet ? block.yOffset : page.yOriginOffset;
                         for (ImageStrip strip : block.strips) {
-                            groupWriter.write(out, strip, seq);
+                            groupWriter.write(out, strip, seq, bx, by);
                             seq += 9;
                         }
                     }

@@ -79,9 +79,23 @@ public final class AfpSectionParser {
                     iidSeen = false;
                 } else if (sf instanceof EII) {
                     // End of current block — nothing to do
-                } else if (sf instanceof IOC && blockIndex >= 0) {
-                    page.setIocOffset((IOC) sf);
+                } else if (sf instanceof IOC && blockIndex >= 0
+                           && blockIndex < blocks.size()) {
+                    // Store the IOC offset on the block so each strip
+                    // uses its own block's IOC, not a global value.
+                    IOC ioc = (IOC) sf;
+                    ImageBlock blk = blocks.get(blockIndex);
+                    blk.xOffset = ioc.getXoaOset() != null ? ioc.getXoaOset() : 0;
+                    blk.yOffset = ioc.getYoaOset() != null ? ioc.getYoaOset() : 0;
+                    blk.iocSet = true;
+                    // Also set global for single-block files
+                    page.setIocOffset(ioc);
                 } else if (sf instanceof IID && blockIndex >= 0) {
+                    // IID defines the image's coordinate system (units).
+                    // ICP coordinates/fill sizes are in this space and
+                    // must be scaled to the page coordinate system (PGD).
+                    // Only the FIRST IID sets the scale; subsequent IIDs
+                    // (from later image blocks) are ignored.
                     page.setIidScale((IID) sf);
                     iidSeen = true;
                 } else if (sf instanceof ICP && blockIndex >= 0) {

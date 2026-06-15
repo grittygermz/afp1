@@ -51,6 +51,13 @@ public class SectionBounds {
         public final boolean hasICP;
         /** Strips belonging to this block (populated during afplib parsing). */
         public final List<ImageStrip> strips = new ArrayList<>();
+        /**
+         * IOC origin offset for this block.  Each BII/EII block may have
+         * its own IOC; strips use their block's offset, not a global value.
+         */
+        public int xOffset;
+        public int yOffset;
+        public boolean iocSet;
 
         public ImageBlock(int start, int end, boolean hasICP) {
             this.start = start;

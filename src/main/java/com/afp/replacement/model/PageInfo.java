@@ -38,6 +38,7 @@ public class PageInfo {
      */
     public double scaleX = 1.0;
     public double scaleY = 1.0;
+    private boolean iidScaleSet;
 
     /** Populates fields from an afplib PGD object. */
     public void readFrom(PGD pgd) {
@@ -59,11 +60,19 @@ public class PageInfo {
      * Must be called after both {@link #readFrom(PGD)} and after the
      * IID field has been parsed.
      */
+    /**
+     * Computes the IID-to-page scale factors from the first IID encountered.
+     * Subsequent calls are ignored so that later IID values (e.g. from a
+     * second image block) don't corrupt the scaling established by the first
+     * block's IID.
+     */
     public void setIidScale(IID iid) {
+        if (iidScaleSet) return;
         int iidXUnits = require(iid.getXUnits(), "IID.xUnits");
         int iidYUnits = require(iid.getYUnits(), "IID.yUnits");
         this.scaleX = (double) xUnits / iidXUnits;
         this.scaleY = (double) yUnits / iidYUnits;
+        iidScaleSet = true;
     }
 
     /** Throws if any required page fields are missing. */
